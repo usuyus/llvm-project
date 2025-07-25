@@ -124,6 +124,8 @@
 #include <utility>
 #include <vector>
 
+#include "OcamlGCPrinter.cpp.hack"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
@@ -3853,6 +3855,11 @@ GCMetadataPrinter *AsmPrinter::getOrCreateGCPrinter(GCStrategy &S) {
       GCPI->second = std::move(GMP);
       return GCPI->second.get();
     }
+
+  // kodun icinden gecince olur gibi
+  if (Name == "ocaml") {
+    return new OcamlGCMetadataPrinter();
+  }
 
   report_fatal_error("no GCMetadataPrinter registered for GC: " + Twine(Name));
 }

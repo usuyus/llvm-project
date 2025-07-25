@@ -20,7 +20,6 @@ add_llvm_component_library(LLVMAsmPrinter
   DwarfUnit.cpp
   EHStreamer.cpp
   ErlangGCPrinter.cpp
-  OcamlGCPrinter.cpp
   PseudoProbePrinter.cpp
   WinCFGuard.cpp
   WinException.cpp
