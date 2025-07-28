@@ -49,12 +49,28 @@ GCMetadataPrinterRegistry::Add<OcamlGCMetadataPrinter>
 
 void llvm::linkOcamlGCPrinter() {}
 
+static std::string MakeCamlIdentifier(const Module &M, std::string suffix) {
+  const std::string &MId = M.getModuleIdentifier();
+
+  std::string Identifier;
+  Identifier += "caml";
+  size_t Letter = Identifier.size();
+  Identifier.append(MId.begin(), llvm::find(MId, '.'));
+  Identifier += "__";
+  Identifier += suffix;
+
+  // Capitalize the first letter of the module name.
+  Identifier[Letter] = toupper(Identifier[Letter]);
+
+  return Identifier;
+}
+
 // This is done for now since I couldn't figure out a way to reference
 // the current line
 static MCSymbol *EmitFrametableSymbol(const Module &M, AsmPrinter &AP,
                                       StringRef SymFromName) {
   std::string SymName;
-  SymName += "caml_ft_";
+  SymName += ".Lcamlft";
   SymName += SymFromName.str();
 
   SmallString<128> TmpStr;
@@ -67,17 +83,7 @@ static MCSymbol *EmitFrametableSymbol(const Module &M, AsmPrinter &AP,
 }
 
 static MCSymbol *EmitCamlGlobal(const Module &M, AsmPrinter &AP, const char *Id) {
-  const std::string &MId = M.getModuleIdentifier();
-
-  std::string SymName;
-  SymName += "caml";
-  size_t Letter = SymName.size();
-  SymName.append(MId.begin(), llvm::find(MId, '.'));
-  SymName += "__";
-  SymName += Id;
-
-  // Capitalize the first letter of the module name.
-  SymName[Letter] = toupper(SymName[Letter]);
+  std::string SymName = MakeCamlIdentifier(M, Id);
 
   SmallString<128> TmpStr;
   Mangler::getNameWithPrefix(TmpStr, SymName, M.getDataLayout());
@@ -104,16 +110,15 @@ void OcamlGCMetadataPrinter::beginAssembly(Module &M, GCModuleInfo &Info,
 ///   extern "C" struct align(sizeof(intptr_t)) {
 ///     int64_t NumDescriptors;
 ///     struct align(sizeof(intptr_t)) {
-///       uint32_t RelativeReturnAddress;
-///       uint16_t FrameSize;
+///       uint32_t ReturnAddrOffset;
+///       uint16_t FrameSize; // lower two bits are flags (DEBUG, ALLOC)
 ///       uint16_t NumLiveOffsets;
 ///       uint16_t LiveOffsets[NumLiveOffsets];
 ///     } Descriptors[NumDescriptors];
 ///   } caml${module}__frametable;
 ///
-/// Note that this precludes programs from stack frames larger than 64K
-/// (FrameSize and LiveOffsets would overflow). FrameTablePrinter will abort if
-/// either condition is detected in a function which uses the GC.
+/// Stack frames larger than 64K are handled by "long frames", which are
+/// currently unimplemented.
 ///
 void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
                                             AsmPrinter &AP) {
@@ -129,7 +134,7 @@ void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
   // (it seems to emit this after both code_end and data_end...?)
   AP.OutStreamer->emitIntValue(0, IntPtrSize);
 
-  AP.OutStreamer->switchSection(AP.getObjFileLowering().getDataSection());
+  AP.OutStreamer->switchSection(AP.getObjFileLowering().getTextSection());
   MCSymbol *FTBegin = EmitCamlGlobal(M, AP, "frametable");
 
   int NumDescriptors = 0;
@@ -141,10 +146,6 @@ void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
     NumDescriptors += FI->size();
   }
 
-  // if (NumDescriptors >= 1 << 16) {
-  //   // Very rude!
-  //   report_fatal_error(" Too much descriptor for ocaml GC");
-  // }
   AP.emitInt64(NumDescriptors);
 
   for (std::unique_ptr<GCFunctionInfo> &FI :
@@ -204,10 +205,10 @@ void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
     }
   }
 
-  MCSymbol *FTEnd = EmitFrametableSymbol(M, AP, "end");
-  AP.OutStreamer->emitELFSize(FTBegin, MCBinaryExpr::createSub(
-    MCSymbolRefExpr::create(FTEnd, AP.OutContext),
-    MCSymbolRefExpr::create(FTBegin, AP.OutContext),
-    AP.OutContext
-  ));
+  // MCSymbol *FTEnd = EmitFrametableSymbol(M, AP, "end");
+  // AP.OutStreamer->emitELFSize(FTBegin, MCBinaryExpr::createSub(
+  //   MCSymbolRefExpr::create(FTEnd, AP.OutContext),
+  //   MCSymbolRefExpr::create(FTBegin, AP.OutContext),
+  //   AP.OutContext
+  // ));
 }
