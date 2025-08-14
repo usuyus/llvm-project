@@ -307,6 +307,8 @@ namespace llvm {
     // SjLj exception handling dispatch.
     EH_SJLJ_SETUP_DISPATCH,
 
+    EH_OCAML_TRY,
+
     /// Tail call return. See X86TargetLowering::LowerCall for
     /// the list of operands.
     TC_RETURN,
@@ -1649,6 +1651,7 @@ namespace llvm {
     SDValue lowerEH_SJLJ_SETJMP(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerEH_SJLJ_LONGJMP(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerEH_SJLJ_SETUP_DISPATCH(SDValue Op, SelectionDAG &DAG) const;
+    SDValue lowerEH_OCAML_TRY(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINIT_TRAMPOLINE(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
@@ -1778,6 +1781,9 @@ namespace llvm {
     MachineBasicBlock *EmitSjLjDispatchBlock(MachineInstr &MI,
                                              MachineBasicBlock *MBB) const;
 
+    MachineBasicBlock *emitEHOCamlTry(MachineInstr &MI,
+                                        MachineBasicBlock *MBB) const;
+                                         
     /// Emit flags for the given setcc condition and operands. Also returns the
     /// corresponding X86 condition code constant in X86CC.
     SDValue emitFlagsForSetcc(SDValue Op0, SDValue Op1, ISD::CondCode CC,

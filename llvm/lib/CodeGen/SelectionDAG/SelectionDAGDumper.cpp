@@ -139,6 +139,7 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
   case ISD::EH_SJLJ_SETJMP:             return "EH_SJLJ_SETJMP";
   case ISD::EH_SJLJ_LONGJMP:            return "EH_SJLJ_LONGJMP";
   case ISD::EH_SJLJ_SETUP_DISPATCH:     return "EH_SJLJ_SETUP_DISPATCH";
+  case ISD::EH_OCAML_TRY:               return "EH_OCAML_TRY";
   case ISD::ConstantPool:               return "ConstantPool";
   case ISD::TargetIndex:                return "TargetIndex";
   case ISD::ExternalSymbol:             return "ExternalSymbol";

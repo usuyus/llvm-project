@@ -476,6 +476,8 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
   setOperationAction(ISD::EH_SJLJ_SETUP_DISPATCH, MVT::Other, Custom);
   if (TM.Options.ExceptionModel == ExceptionHandling::SjLj)
     setLibcallName(RTLIB::UNWIND_RESUME, "_Unwind_SjLj_Resume");
+  
+  setOperationAction(ISD::EH_OCAML_TRY, MVT::i32, Custom);
 
   // Darwin ABI issue.
   for (auto VT : { MVT::i32, MVT::i64 }) {
@@ -28902,6 +28904,16 @@ SDValue X86TargetLowering::lowerEH_SJLJ_SETUP_DISPATCH(SDValue Op,
                      Op.getOperand(0));
 }
 
+SDValue X86TargetLowering::lowerEH_OCAML_TRY(SDValue Op,
+                                             SelectionDAG &DAG) const {
+
+  LLVM_DEBUG(dbgs() << "lower ocaml try\n");
+  SDLoc DL(Op);
+  return DAG.getNode(X86ISD::EH_OCAML_TRY, DL,
+                     DAG.getVTList(MVT::i32, MVT::Other),
+                     Op.getOperand(0));
+}
+
 static SDValue LowerADJUST_TRAMPOLINE(SDValue Op, SelectionDAG &DAG) {
   return Op.getOperand(0);
 }
@@ -33259,6 +33271,7 @@ SDValue X86TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::EH_SJLJ_LONGJMP:    return lowerEH_SJLJ_LONGJMP(Op, DAG);
   case ISD::EH_SJLJ_SETUP_DISPATCH:
     return lowerEH_SJLJ_SETUP_DISPATCH(Op, DAG);
+  case ISD::EH_OCAML_TRY:       return lowerEH_OCAML_TRY(Op, DAG);
   case ISD::INIT_TRAMPOLINE:    return LowerINIT_TRAMPOLINE(Op, DAG);
   case ISD::ADJUST_TRAMPOLINE:  return LowerADJUST_TRAMPOLINE(Op, DAG);
   case ISD::GET_ROUNDING:       return LowerGET_ROUNDING(Op, DAG);
@@ -34489,6 +34502,7 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(EH_SJLJ_SETJMP)
   NODE_NAME_CASE(EH_SJLJ_LONGJMP)
   NODE_NAME_CASE(EH_SJLJ_SETUP_DISPATCH)
+  NODE_NAME_CASE(EH_OCAML_TRY)
   NODE_NAME_CASE(EH_RETURN)
   NODE_NAME_CASE(TC_RETURN)
   NODE_NAME_CASE(FNSTCW16m)
@@ -37230,6 +37244,28 @@ X86TargetLowering::EmitSjLjDispatchBlock(MachineInstr &MI,
 }
 
 MachineBasicBlock *
+X86TargetLowering::emitEHOCamlTry(MachineInstr &MI,
+                                    MachineBasicBlock *MBB) const {
+
+  LLVM_DEBUG(dbgs() << "emit ocaml try\n");
+  const DebugLoc &DL = MI.getDebugLoc();
+  // MachineFunction *MF = MBB->getParent();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  // MachineRegisterInfo &MRI = MF->getRegInfo();
+  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+
+  unsigned DstReg = MI.getOperand(0).getReg();
+
+  MachineInstrBuilder MIB;
+
+  MIB = BuildMI(*MBB, MI, DL, TII->get(X86::MOV32ri), DstReg).addImm(0);
+  MIB.addRegMask(RegInfo->getNoPreservedMask());
+  
+  MI.eraseFromParent();
+  return MBB;
+}
+
+MachineBasicBlock *
 X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                MachineBasicBlock *BB) const {
   MachineFunction *MF = BB->getParent();
@@ -37478,6 +37514,9 @@ X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
   case X86::Int_eh_sjlj_setup_dispatch:
     return EmitSjLjDispatchBlock(MI, BB);
+  
+  case X86::EH_OCaml_Try:
+    return emitEHOCamlTry(MI, BB);
 
   case TargetOpcode::STATEPOINT:
     // As an implementation detail, STATEPOINT shares the STACKMAP format at

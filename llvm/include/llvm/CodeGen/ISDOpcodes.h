@@ -150,6 +150,8 @@ enum NodeType {
   /// The target initializes the dispatch table here.
   EH_SJLJ_SETUP_DISPATCH,
 
+  EH_OCAML_TRY,
+
   /// TargetConstant* - Like Constant*, but the DAG does not do any folding,
   /// simplification, or lowering of the constant. They are used for constants
   /// which are known to fit in the immediate fields of their users, or for

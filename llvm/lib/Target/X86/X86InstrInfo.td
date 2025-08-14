@@ -246,6 +246,10 @@ def X86eh_sjlj_setup_dispatch : SDNode<"X86ISD::EH_SJLJ_SETUP_DISPATCH",
                                        SDTypeProfile<0, 0, []>,
                                        [SDNPHasChain, SDNPSideEffect]>;
 
+def X86eh_ocaml_try  : SDNode<"X86ISD::EH_OCAML_TRY",
+                                SDTypeProfile<1, 0, [SDTCisInt<0>]>,
+                                [SDNPHasChain, SDNPSideEffect]>;
+
 def X86tcret : SDNode<"X86ISD::TC_RETURN", SDT_X86TCRET,
                         [SDNPHasChain,  SDNPOptInGlue, SDNPVariadic]>;
 

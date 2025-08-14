@@ -230,6 +230,15 @@ let isBranch = 1, isTerminator = 1, isCodeGenOnly = 1 in {
   def EH_SjLj_Setup : I<0, Pseudo, (outs), (ins brtarget:$dst),
                         "#EH_SjLj_Setup\t$dst", []>;
 }
+
+let Defs = [RAX], hasSideEffects = 1, isBarrier = 1, isCodeGenOnly = 1,
+    usesCustomInserter = 1 in {
+  
+  def EH_OCaml_Try  : I<0, Pseudo, (outs EAX:$dst), (ins),
+                      "#EH_OCAML_TRY",
+                      [(set GR32:$dst, (X86eh_ocaml_try))]>;
+}
+
 } // SchedRW
 
 //===----------------------------------------------------------------------===//
