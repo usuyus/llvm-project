@@ -154,7 +154,7 @@ void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
       // this function is managed by some other GC
       continue;
 
-    uint64_t FrameSize = FI->getFrameSize();
+    uint64_t FrameSize = FI->getFrameSize() + 8;
     if (FrameSize >= 1 << 16) {
       // Very rude!
       report_fatal_error("Function '" + FI->getFunction().getName() +
