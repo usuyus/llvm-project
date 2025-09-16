@@ -15,6 +15,7 @@
 #include "llvm/IR/GCStrategy.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -38,8 +39,15 @@ public:
 class OcamlGC : public GCStrategy {
 public:
   OcamlGC() {
-    NeededSafePoints = true;
+    UseStatepoints = true;
+    UseRS4GC = true;
+    NeededSafePoints = false;
     UsesMetadata = true;
+  }
+
+  std::optional<bool> isGCManagedPointer(const Type *Ty) const override {
+    const PointerType *PT = cast<PointerType>(Ty);
+    return (1 == PT->getAddressSpace());
   }
 };
 

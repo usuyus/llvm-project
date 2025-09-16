@@ -16,16 +16,19 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/IR/BuiltinGCs.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDirectives.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -39,16 +42,17 @@ class OcamlGCMetadataPrinter : public GCMetadataPrinter {
 public:
   void beginAssembly(Module &M, GCModuleInfo &Info, AsmPrinter &AP) override;
   void finishAssembly(Module &M, GCModuleInfo &Info, AsmPrinter &AP) override;
+  bool emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) override;
 };
 
 } // end anonymous namespace
 
 static GCMetadataPrinterRegistry::Add<OcamlGCMetadataPrinter>
-    Y("ocaml", "ocaml 3.10-compatible collector");
+    Y("ocaml", "ocaml frametable printer");
 
 void llvm::linkOcamlGCPrinter() {}
 
-static void EmitCamlGlobal(const Module &M, AsmPrinter &AP, const char *Id) {
+static std::string camlGlobalSymName(const Module &M, const char *Id) {
   const std::string &MId = M.getModuleIdentifier();
 
   std::string SymName;
@@ -61,122 +65,176 @@ static void EmitCamlGlobal(const Module &M, AsmPrinter &AP, const char *Id) {
   // Capitalize the first letter of the module name.
   SymName[Letter] = toupper(SymName[Letter]);
 
+  return SymName;
+}
+
+static void emitCamlGlobal(const Module &M, MCStreamer &OS, const char *Id) {
+  std::string SymName = camlGlobalSymName(M, Id);
+
   SmallString<128> TmpStr;
   Mangler::getNameWithPrefix(TmpStr, SymName, M.getDataLayout());
 
-  MCSymbol *Sym = AP.OutContext.getOrCreateSymbol(TmpStr);
+  MCSymbol *Sym = OS.getContext().getOrCreateSymbol(TmpStr);
 
-  AP.OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
-  AP.OutStreamer->emitLabel(Sym);
+  OS.emitSymbolAttribute(Sym, MCSA_Global);
+  OS.emitLabel(Sym);
 }
 
 void OcamlGCMetadataPrinter::beginAssembly(Module &M, GCModuleInfo &Info,
                                            AsmPrinter &AP) {
   AP.OutStreamer->switchSection(AP.getObjFileLowering().getTextSection());
-  EmitCamlGlobal(M, AP, "code_begin");
+  emitCamlGlobal(M, *(AP.OutStreamer), "code_begin");
 
   AP.OutStreamer->switchSection(AP.getObjFileLowering().getDataSection());
-  EmitCamlGlobal(M, AP, "data_begin");
+  emitCamlGlobal(M, *(AP.OutStreamer), "data_begin");
 }
 
-/// emitAssembly - Print the frametable. The ocaml frametable format is thus:
-///
-///   extern "C" struct align(sizeof(intptr_t)) {
-///     uint16_t NumDescriptors;
-///     struct align(sizeof(intptr_t)) {
-///       void *ReturnAddress;
-///       uint16_t FrameSize;
-///       uint16_t NumLiveOffsets;
-///       uint16_t LiveOffsets[NumLiveOffsets];
-///     } Descriptors[NumDescriptors];
-///   } caml${module}__frametable;
-///
-/// Note that this precludes programs from stack frames larger than 64K
-/// (FrameSize and LiveOffsets would overflow). FrameTablePrinter will abort if
-/// either condition is detected in a function which uses the GC.
-///
+
 void OcamlGCMetadataPrinter::finishAssembly(Module &M, GCModuleInfo &Info,
-                                            AsmPrinter &AP) {
-  unsigned IntPtrSize = M.getDataLayout().getPointerSize();
-
+                                         AsmPrinter &AP) {
   AP.OutStreamer->switchSection(AP.getObjFileLowering().getTextSection());
-  EmitCamlGlobal(M, AP, "code_end");
+  emitCamlGlobal(M, *(AP.OutStreamer), "code_end");
 
   AP.OutStreamer->switchSection(AP.getObjFileLowering().getDataSection());
-  EmitCamlGlobal(M, AP, "data_end");
+  emitCamlGlobal(M, *(AP.OutStreamer), "data_end");
+}
 
-  // FIXME: Why does ocaml emit this??
-  AP.OutStreamer->emitIntValue(0, IntPtrSize);
+/// Map LLVM DWARF register numbers to OCaml register map.
+/// * See llvm/lib/Target/X86/X86RegisterInfo.td for DWARF register numbers.
+/// * See Reg_class.gpr_dwarf_reg_numbers for the OCaml register map.
+/// CR yusumez: This is target-specific and should probably live in a
+/// target-specific location.
 
-  AP.OutStreamer->switchSection(AP.getObjFileLowering().getDataSection());
-  EmitCamlGlobal(M, AP, "frametable");
+// Directly taken from [Reg_class.gpr_dwarf_reg_numbers]:
+// https://github.com/oxcaml/oxcaml/blob/main/backend/amd64/reg_class.ml#L26
+// Note that R14 and R15 are added for completeness
+static constexpr std::array<unsigned, 16> GPR_OCamlToDwarf =
+  { 0, 3, 5, 4, 1, 2, 8, 9, 12, 13, 10, 11, 6, 14, 15 };
 
-  int NumDescriptors = 0;
-  for (std::unique_ptr<GCFunctionInfo> &FI :
-       llvm::make_range(Info.funcinfo_begin(), Info.funcinfo_end())) {
-    if (FI->getStrategy().getName() != getStrategy().getName())
-      // this function is managed by some other GC
-      continue;
-    NumDescriptors += FI->size();
-  }
-
-  if (NumDescriptors >= 1 << 16) {
-    // Very rude!
-    report_fatal_error(" Too much descriptor for ocaml GC");
-  }
-  AP.emitInt16(NumDescriptors);
-  AP.emitAlignment(IntPtrSize == 4 ? Align(4) : Align(8));
-
-  for (std::unique_ptr<GCFunctionInfo> &FI :
-       llvm::make_range(Info.funcinfo_begin(), Info.funcinfo_end())) {
-    if (FI->getStrategy().getName() != getStrategy().getName())
-      // this function is managed by some other GC
-      continue;
-
-    uint64_t FrameSize = FI->getFrameSize();
-    if (FrameSize >= 1 << 16) {
-      // Very rude!
-      report_fatal_error("Function '" + FI->getFunction().getName() +
-                         "' is too large for the ocaml GC! "
-                         "Frame size " +
-                         Twine(FrameSize) +
-                         ">= 65536.\n"
-                         "(" +
-                         Twine(reinterpret_cast<uintptr_t>(FI.get())) + ")");
+static constexpr auto GPR_DwarfToOcaml = []() {
+  std::array<unsigned, 16> result{};
+  for (size_t ocaml_idx = 0; ocaml_idx < GPR_OCamlToDwarf.size(); ++ocaml_idx) {
+    unsigned dwarf_reg = GPR_OCamlToDwarf[ocaml_idx];
+    if (dwarf_reg < result.size()) {
+      result[dwarf_reg] = ocaml_idx;
     }
+  }
+  return result;
+}();
 
-    AP.OutStreamer->AddComment("live roots for " +
-                               Twine(FI->getFunction().getName()));
-    AP.OutStreamer->addBlankLine();
+static const unsigned XMMBeginOcaml = 100;
+static const unsigned XMMBeginDwarf = 17;
+static const unsigned XMMEndDwarf = 32;
 
-    for (GCFunctionInfo::iterator J = FI->begin(), JE = FI->end(); J != JE;
-         ++J) {
-      size_t LiveCount = FI->live_size(J);
-      if (LiveCount >= 1 << 16) {
-        // Very rude!
-        report_fatal_error("Function '" + FI->getFunction().getName() +
-                           "' is too large for the ocaml GC! "
-                           "Live root count " +
-                           Twine(LiveCount) + " >= 65536.");
+static unsigned mapLLVMDwarfRegToOCamlIndex(unsigned DwarfRegNum) {
+  if (DwarfRegNum < GPR_DwarfToOcaml.size()) {
+    return GPR_DwarfToOcaml[DwarfRegNum];
+  } else if (XMMBeginDwarf <= DwarfRegNum && DwarfRegNum <= XMMEndDwarf) {
+    return DwarfRegNum - XMMBeginDwarf + XMMBeginOcaml;
+  } else {
+    report_fatal_error("Unrecognised DWARF register for use in OCaml frametable: "
+      + Twine(DwarfRegNum));
+  }
+}
+
+bool OcamlGCMetadataPrinter::emitStackMaps(Module &M, StackMaps &SM, AsmPrinter &AP) {
+  MCStreamer &OS = *AP.OutStreamer;
+  unsigned PtrSize = M.getDataLayout().getPointerSize(); // Can only be 8 for now
+  
+  OS.switchSection(AP.getObjFileLowering().getDataSection());
+  
+  emitCamlGlobal(M, OS, "frametable");
+
+  // Number of records
+  OS.emitInt64(SM.getCSInfos().size());
+
+  for (const auto &CSI : SM.getCSInfos()) {
+    // From runtime/frame_descriptors.h:
+    // https://github.com/oxcaml/oxcaml/blob/main/runtime/caml/frame_descriptors.h#L63
+    //
+    // typedef struct {
+    //   int32_t retaddr_rel; /* offset of return address from &retaddr_rel */
+    //   uint16_t frame_data; /* frame size and various flags */
+    //   uint16_t num_live;
+    //   uint16_t live_ofs[num_live];
+    // } frame_descr;
+
+    // retaddr_rel
+    MCSymbol *Here = OS.getContext().createTempSymbol();
+    OS.emitLabel(Here);
+    const MCExpr *RelativeAddr = MCBinaryExpr::createSub(
+        MCSymbolRefExpr::create(CSI.CSLabel, OS.getContext()),
+        MCSymbolRefExpr::create(Here, OS.getContext()),
+        OS.getContext());
+    OS.emitValue(RelativeAddr, 4);
+
+    // frame_data
+    uint64_t FrameSize = CSI.CSFunctionInfo.StaticStackSize;
+    if (CSI.ID != StatepointDirectives::DefaultStatepointID)
+      FrameSize += CSI.ID; // Stack offset from OxCaml
+    FrameSize += PtrSize; // Return address
+
+    if (FrameSize >= 1 << 16)
+      report_fatal_error("Long frames not supported for OCaml GC: FrameSize = "
+        + Twine(FrameSize));
+    OS.emitInt16(FrameSize);
+
+    // num_live
+    uint64_t LiveCount = 0;
+    for (const auto &Loc : CSI.Locations) {
+      if (Loc.Type == StackMaps::Location::Register ||
+          Loc.Type == StackMaps::Location::Direct ||
+          Loc.Type == StackMaps::Location::Indirect) {
+        LiveCount++;
       }
+    }
+    LiveCount += CSI.LiveOuts.size();
 
-      AP.OutStreamer->emitSymbolValue(J->Label, IntPtrSize);
-      AP.emitInt16(FrameSize);
-      AP.emitInt16(LiveCount);
+    if (LiveCount >= 1 << 16)
+      report_fatal_error("Long frames not supported for OCaml GC: LiveCount = "
+        + Twine(LiveCount));
+    OS.emitInt16(LiveCount);
 
-      for (GCFunctionInfo::live_iterator K = FI->live_begin(J),
-                                         KE = FI->live_end(J);
-           K != KE; ++K) {
-        if (K->StackOffset >= 1 << 16) {
-          // Very rude!
-          report_fatal_error(
-              "GC root stack offset is outside of fixed stack frame and out "
-              "of range for ocaml GC!");
+    // live_ofs
+    for (const auto &Loc : CSI.Locations) {
+      if (Loc.Type == StackMaps::Location::Register) {
+        // Register indices are tagged (2n+1) and follow the OCaml register
+        // map (see `mapLLVMDwarfRegToOCamlIndex`)
+        unsigned DwarfRegNum = Loc.Reg;
+        unsigned OCamlIndex = mapLLVMDwarfRegToOCamlIndex(DwarfRegNum);
+        uint16_t EncodedReg = (OCamlIndex << 1) + 1;
+        OS.emitInt16(EncodedReg);
+      } else if (Loc.Type == StackMaps::Location::Direct ||
+                 Loc.Type == StackMaps::Location::Indirect) {
+        // For stack locations (Direct/Indirect): emit offset directly
+        int64_t Offset = Loc.Offset;
+
+        // BP-relative addressing -> SP
+        if (Offset < 0) {
+          int64_t TempFrameSize =
+            FrameSize - PtrSize /* return address */ - PtrSize /* pushed BP */;
+          Offset += TempFrameSize;
         }
-        AP.emitInt16(K->StackOffset);
+        
+        if (Offset < -(1 << 15) || Offset >= (1 << 15)) {
+          report_fatal_error("Stack offset too large for OxCaml frametable: "
+            + Twine(Offset));
+        }
+        OS.emitInt16(static_cast<uint16_t>(Offset));
+      } else {
+        // CR yusumez: Do we need anything else?
       }
-
-      AP.emitAlignment(IntPtrSize == 4 ? Align(4) : Align(8));
     }
+
+    for (const auto &LO : CSI.LiveOuts) {
+      unsigned OCamlIndex = mapLLVMDwarfRegToOCamlIndex(LO.DwarfRegNum);
+      uint16_t EncodedReg = (OCamlIndex << 1) + 1;
+      OS.emitInt16(EncodedReg);
+    }
+
+    OS.emitValueToAlignment(Align(PtrSize));
   }
+
+  OS.addBlankLine();
+  return true;
 }

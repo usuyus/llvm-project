@@ -343,6 +343,7 @@ static bool isHandledGCPointerType(Type *T) {
   if (auto VT = dyn_cast<VectorType>(T))
     if (isGCPointerType(VT->getElementType()))
       return true;
+
   return false;
 }
 
@@ -356,8 +357,13 @@ static bool containsGCPtrType(Type *Ty) {
     return isGCPointerType(VT->getScalarType());
   if (ArrayType *AT = dyn_cast<ArrayType>(Ty))
     return containsGCPtrType(AT->getElementType());
+  
+  // Don't scan structs - in our use case, we extract all its elements right
+  // after they get created. Make sure to check this assumption still holds
+  // with new changes.
   if (StructType *ST = dyn_cast<StructType>(Ty))
-    return llvm::any_of(ST->elements(), containsGCPtrType);
+    return false; // llvm::any_of(ST->elements(), containsGCPtrType);
+  
   return false;
 }
 
@@ -3034,8 +3040,10 @@ static bool shouldRewriteStatepointsIn(Function &F) {
     const auto &FunctionGCName = F.getGC();
     const StringRef StatepointExampleName("statepoint-example");
     const StringRef CoreCLRName("coreclr");
+    const StringRef OcamlName("ocaml");
     return (StatepointExampleName == FunctionGCName) ||
-           (CoreCLRName == FunctionGCName);
+           (CoreCLRName == FunctionGCName) ||
+           (OcamlName == FunctionGCName);
   } else
     return false;
 }
@@ -3079,6 +3087,13 @@ bool RewriteStatepointsForGC::runOnFunction(Function &F, DominatorTree &DT,
                "Don't expect any other calls here!");
         return false;
       }
+      
+      if (Call->isMustTailCall())
+        return false;
+      
+      if (isa<CallInst>(Call) && cast<CallInst>(Call)->isInlineAsm())
+        return false;
+
       return true;
     }
     return false;
